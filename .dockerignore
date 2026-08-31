@@ -1,0 +1,22 @@
+# Nothing private ships in the image. The static handler is allowlisted too,
+# but defense in depth: if it is not in the image, it cannot be served.
+.git
+.gitignore
+node_modules
+
+# Private working material
+research/
+jobhunt/
+*.pdf
+body.html
+.env*
+*.log
+
+# Real runtime data — the container boots from seed/ instead
+events.jsonl
+drafts/
+
+# Local-only docs and specs the deployed server does not need
+CLAUDE.md
+azure/
+.github/

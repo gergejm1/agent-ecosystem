@@ -1,0 +1,18 @@
+# Runtime data — the event log and draft queue are working state, not source.
+# drafts/ also contains real third-party PII (named prospects, outreach copy)
+# and must never reach a public repo or a deployed container.
+events.jsonl
+drafts/
+node_modules/
+.digest-state.json
+
+# Private working material. Not portfolio artifacts:
+#   research/ — SeatCompress marketing strategy and competitive analysis
+#   jobhunt/  — resume, salary research, application targets
+research/
+jobhunt/
+*.pdf
+body.html
+
+# The seed/ directory is deliberately NOT ignored — it holds the synthetic
+# demo dataset the deployed container ships with.

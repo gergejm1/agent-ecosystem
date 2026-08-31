@@ -1,0 +1,9 @@
+{
+  "events": [
+    { "kind": "info", "text": "HOOK: Productiv ceased operations Aug 6, 2026 (creditor wind-down, customer data destroyed) — 'rethink SaaS-spend tooling' moment, honest adjacent angle only [https://www.toriihq.com/blog/why-did-productiv-shut-down]", "tokens": 41200 },
+    { "kind": "info", "text": "HOOK: Gartner — $234B (~20%) of enterprise SaaS spend at risk from agentic arbitrage by 2030 — anchor stat for the thesis pillar [https://www.cio.com/article/4192242/agentic-ai-puts-234b-in-enterprise-saas-spending-at-risk-gartner-says.html]" },
+    { "kind": "warn", "text": "COMPETITOR: Vertice acquired Vendr (Jun 1) — 250K contracts data moat; realest future threat to the seat-compression wedge [https://www.prnewswire.com/news-releases/vertice-acquires-vendr-to-create-the-worlds-largest-procurement-intelligence-dataset-and-lead-autonomous-ai-negotiation-302786407.html]" },
+    { "kind": "info", "text": "HOOK: Ben Murray (The SaaS CFO) 'SaaSpocalypse' essay is the closest voice to our thesis with no tool behind it — guest-pitch target [https://www.thesaascfo.com/the-saaspocalypse-ai-agents-vibe-coding-and-the-changing-economics-of-saas/]" }
+  ],
+  "drafts": []
+}

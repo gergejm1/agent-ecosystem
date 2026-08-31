@@ -1,0 +1,1031 @@
+<!doctype html>
+<!--
+  AGENT ECOSYSTEM — MARKETING OPS TERMINAL (Phase 1: Simulation)
+  ================================================================
+  A retro CRT-terminal visualization of an AI marketing agent fleet.
+  Right now every event is produced by the built-in MockEngine.
+
+  Phase 2 plan (wiring in real agents):
+    - Real agents (Claude Agent SDK / scheduled Claude Code runs) write
+      events with the SAME shape the mock engine uses:
+        { agent:"QUILL", station:"foundry", kind:"draft"|"info"|"warn"|"crit",
+          text:"...", tokens:1234, draft:{kind,app,title,body} }
+    - Feed them to this page via window.ECOSYS.ingest(event)  (e.g. poll an
+      events.jsonl over fetch, or push over a WebSocket) and flip
+      window.ECOSYS.setMode("LIVE").
+    - The approval queue then becomes a real human-in-the-loop gate.
+
+  Rename the apps in CONFIG.apps below to your actual products.
+-->
+<title>AGENT ECOSYSTEM // MARKETING OPS</title>
+<style>
+  :root{
+    --bg:#030906; --surface:#071710; --surface-2:#0a2015;
+    --line:#14522e; --line-dim:#0d3520;
+    --ink:#b8f4cc; --ink-2:#6bcb90; --ink-dim:#41855e;
+    --bright:#eafff1; --accent:#41ff8a;
+    --warn:#ffc857; --crit:#ff6b6b;
+    --glow:0 0 6px rgba(65,255,138,.35);
+    --mono:ui-monospace,"Cascadia Mono",Consolas,"Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:radial-gradient(120% 90% at 50% 10%, #08140c 0%, var(--bg) 70%);
+    color:var(--ink); font-family:var(--mono); font-size:13px; line-height:1.45;
+    min-height:100vh; overflow-x:hidden;
+  }
+  /* CRT overlay: scanlines + vignette */
+  body::after{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:99;
+    background:repeating-linear-gradient(0deg, rgba(0,0,0,.20) 0 1px, transparent 1px 3px);
+    mix-blend-mode:multiply;
+  }
+  body::before{
+    content:""; position:fixed; inset:0; pointer-events:none; z-index:98;
+    box-shadow:inset 0 0 140px rgba(0,0,0,.75);
+  }
+  @media (prefers-reduced-motion:no-preference){
+    .flicker{animation:flick 7s infinite}
+    @keyframes flick{0%,100%{opacity:1}97%{opacity:1}98%{opacity:.92}99%{opacity:1}}
+  }
+  .wrap{max-width:1500px;margin:0 auto;padding:14px 16px 26px}
+
+  /* ---------- header ---------- */
+  header{
+    display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+    border:1px solid var(--line); background:var(--surface);
+    padding:10px 14px; margin-bottom:12px;
+  }
+  h1{font-size:15px;margin:0;letter-spacing:.12em;color:var(--bright);text-shadow:var(--glow);font-weight:700}
+  h1 small{color:var(--ink-2);font-weight:400;letter-spacing:.08em}
+  .badge{
+    border:1px solid var(--warn); color:var(--warn); padding:2px 8px; font-size:11px;
+    letter-spacing:.14em; animation:pulse 2.4s infinite;
+  }
+  .badge.live{border-color:var(--accent);color:var(--accent)}
+  @keyframes pulse{50%{opacity:.55}}
+  .spacer{flex:1}
+  .clock{color:var(--ink-2);font-size:12px;letter-spacing:.08em}
+  .speed{display:flex;gap:4px}
+  .speed button{
+    background:transparent;border:1px solid var(--line);color:var(--ink-2);
+    font-family:var(--mono);font-size:11px;padding:3px 9px;cursor:pointer;letter-spacing:.08em;
+  }
+  .speed button:hover{border-color:var(--accent);color:var(--accent)}
+  .speed button.on{background:var(--line);color:var(--bright)}
+
+  /* ---------- stat tiles ---------- */
+  .tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:12px}
+  .tile{border:1px solid var(--line);background:var(--surface);padding:10px 12px 12px;position:relative;overflow:hidden}
+  .tile .lbl{font-size:10px;letter-spacing:.16em;color:var(--ink-dim);text-transform:uppercase}
+  .tile .val{font-size:24px;color:var(--bright);text-shadow:var(--glow);margin-top:4px;font-variant-numeric:tabular-nums}
+  .tile .sub{font-size:11px;color:var(--ink-2);margin-top:2px;font-variant-numeric:tabular-nums}
+  .tile .sub.warn{color:var(--warn)}
+  .tile::after{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--line),transparent)}
+
+  /* ---------- layout ---------- */
+  /* main is viewport-clamped: without a definite height the feed grows the grid row,
+     the ResizeObserver regrows the canvas, and the map drifts off-screen. */
+  main{display:grid;grid-template-columns:minmax(0,1fr) 400px;gap:12px;
+       height:clamp(520px, calc(100vh - 224px), 940px)}
+  @media (max-width:1100px){
+    main{grid-template-columns:1fr;height:auto}
+    #mapwrap{height:560px}
+    aside{height:520px}
+    .tiles{grid-template-columns:repeat(2,1fr)}
+  }
+
+  #mapwrap{position:relative;border:1px solid var(--line);background:var(--surface);min-height:0}
+  #map{display:block;width:100%;height:100%;cursor:crosshair}
+  #maptag{
+    position:absolute;left:10px;bottom:8px;font-size:10px;letter-spacing:.14em;color:var(--ink-dim);
+    pointer-events:none;
+  }
+  #maptip{
+    position:absolute;display:none;pointer-events:none;z-index:5;
+    background:rgba(4,14,8,.95);border:1px solid var(--line);padding:6px 9px;font-size:11px;
+    color:var(--ink);max-width:240px;box-shadow:0 0 12px rgba(0,0,0,.6);
+  }
+  #maptip .t{color:var(--bright);letter-spacing:.08em}
+  #maptip .s{color:var(--ink-2)}
+
+  aside{display:flex;flex-direction:column;gap:12px;min-height:0}
+  .panel{border:1px solid var(--line);background:var(--surface);display:flex;flex-direction:column;min-height:0}
+  .panel-h{
+    display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--line-dim);
+    font-size:11px;letter-spacing:.16em;color:var(--ink-2);text-transform:uppercase;
+  }
+  .panel-h .dot{width:6px;height:6px;background:var(--accent);border-radius:50%;box-shadow:var(--glow);animation:pulse 1.8s infinite}
+  .panel-h .clr{margin-left:auto;font-size:10px;color:var(--warn);cursor:pointer;letter-spacing:.1em}
+  .panel-h .clr:hover{text-decoration:underline}
+
+  #feedpanel{flex:1.35}
+  #feed{list-style:none;margin:0;padding:6px 0;overflow-y:auto;flex:1;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+  #feed li{padding:3px 12px;font-size:11.5px;border-left:2px solid transparent;word-wrap:break-word}
+  #feed li:first-child{animation:arrive .3s ease-out}
+  @keyframes arrive{from{opacity:0;transform:translateY(-4px)}to{opacity:1}}
+  #feed .ts{color:var(--ink-dim)}
+  #feed .who{color:var(--bright)}
+  #feed .tag{font-size:10px;letter-spacing:.08em;padding:0 4px;border:1px solid var(--line);color:var(--ink-2);margin:0 4px}
+  #feed li.warn{border-left-color:var(--warn)} #feed li.warn .tag{color:var(--warn);border-color:var(--warn)}
+  #feed li.crit{border-left-color:var(--crit)} #feed li.crit .tag{color:var(--crit);border-color:var(--crit)}
+  #feed li.draft{border-left-color:var(--accent)} #feed li.draft .tag{color:var(--accent);border-color:var(--accent)}
+  #feed li.pub{border-left-color:var(--accent)}
+  #feed li.pub .txt{color:var(--bright)}
+
+  #queuepanel{flex:1}
+  #queue{overflow-y:auto;flex:1;padding:8px 10px;display:flex;flex-direction:column;gap:8px;scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+  .qitem{border:1px solid var(--line-dim);background:var(--surface-2);padding:8px 10px}
+  .qitem .qh{display:flex;gap:6px;align-items:baseline;font-size:10px;letter-spacing:.1em;color:var(--ink-dim)}
+  .qitem .qh .k{color:var(--warn);border:1px solid var(--warn);padding:0 4px}
+  .qitem .qt{color:var(--bright);font-size:12px;margin:4px 0 2px}
+  .qitem .qb{color:var(--ink-2);font-size:11px;font-style:italic}
+  .qitem .qa{display:flex;gap:6px;margin-top:7px}
+  .qitem button{
+    font-family:var(--mono);font-size:10px;letter-spacing:.12em;padding:3px 10px;cursor:pointer;
+    background:transparent;border:1px solid var(--line);color:var(--ink-2);
+  }
+  .qitem button.ok:hover{border-color:var(--accent);color:var(--accent)}
+  .qitem button.no:hover{border-color:var(--crit);color:var(--crit)}
+  .qempty{color:var(--ink-dim);font-size:11px;padding:10px;text-align:center;letter-spacing:.08em}
+
+  footer{margin-top:10px;color:var(--ink-dim);font-size:10.5px;letter-spacing:.06em}
+
+  /* ---------- dossier overlay ---------- */
+  #dossier{
+    position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center;
+    background:rgba(1,5,3,.8);
+  }
+  #dossier.open{display:flex}
+  .dcard{
+    width:min(680px,94vw);border:1px solid var(--accent);background:var(--surface);
+    box-shadow:0 0 40px rgba(65,255,138,.15);padding:0;position:relative;
+  }
+  .dcard .dh{display:flex;align-items:baseline;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line)}
+  .dcard .dh .g{font-size:22px;color:var(--accent);text-shadow:var(--glow)}
+  .dcard .dh .n{font-size:16px;letter-spacing:.18em;color:var(--bright)}
+  .dcard .dh .c{font-size:10px;color:var(--ink-dim);letter-spacing:.12em}
+  .dcard .x{margin-left:auto;cursor:pointer;color:var(--ink-2);border:1px solid var(--line);padding:1px 8px;font-size:11px}
+  .dcard .x:hover{color:var(--crit);border-color:var(--crit)}
+  .dbody{display:grid;grid-template-columns:170px 1fr;gap:14px;padding:14px 16px}
+  @media (max-width:560px){.dbody{grid-template-columns:1fr}}
+  #wireframe{width:170px;height:230px;border:1px solid var(--line-dim);background:#04100a}
+  .drole{font-size:11px;color:var(--warn);letter-spacing:.14em;text-transform:uppercase}
+  .ddir{font-size:12px;color:var(--ink);margin:6px 0 10px}
+  .dstats{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;font-size:11px}
+  .dstats .k{color:var(--ink-dim);letter-spacing:.1em}
+  .dstats .v{color:var(--bright);font-variant-numeric:tabular-nums}
+  .dlog{margin-top:10px;border-top:1px solid var(--line-dim);padding-top:8px;font-size:10.5px;color:var(--ink-2);max-height:110px;overflow-y:auto}
+  .dlog div{padding:1px 0}
+</style>
+
+<div class="wrap flicker">
+  <header>
+    <h1>AGENT ECOSYSTEM <small>// MARKETING OPS TERMINAL</small></h1>
+    <span class="badge" id="modebadge">MODE: SIMULATION</span>
+    <span class="spacer"></span>
+    <span class="clock" id="clock">UPTIME 00:00:00</span>
+    <div class="speed" id="speed">
+      <button data-s="0">❚❚</button><button data-s="1" class="on">1×</button><button data-s="2">2×</button><button data-s="4">4×</button>
+    </div>
+  </header>
+
+  <section class="tiles">
+    <div class="tile"><div class="lbl">Attributed pipeline</div><div class="val" id="t-rev">$0</div><div class="sub" id="t-rev-sub">simulated attribution</div></div>
+    <div class="tile"><div class="lbl">Tokens burned</div><div class="val" id="t-tok">0</div><div class="sub" id="t-tok-sub">≈ $0.00 est. cost</div></div>
+    <div class="tile"><div class="lbl">Drafts produced</div><div class="val" id="t-drafts">0</div><div class="sub">blog · social · replies</div></div>
+    <div class="tile"><div class="lbl">Pending approval</div><div class="val" id="t-queue">0</div><div class="sub" id="t-queue-sub">human-in-the-loop gate</div></div>
+    <div class="tile"><div class="lbl">Published</div><div class="val" id="t-pub">0</div><div class="sub" id="t-pub-sub">0 conversions</div></div>
+  </section>
+
+  <main>
+    <div id="mapwrap">
+      <canvas id="map"></canvas>
+      <div id="maptag">FACILITY VIEW — click an agent for dossier · click a station to filter the feed</div>
+      <div id="maptip"></div>
+    </div>
+    <aside>
+      <div class="panel" id="feedpanel">
+        <div class="panel-h"><span class="dot"></span><span id="feedtitle">Event feed</span><span class="clr" id="feedclr" style="display:none">✕ CLEAR FILTER</span></div>
+        <ul id="feed"></ul>
+      </div>
+      <div class="panel" id="queuepanel">
+        <div class="panel-h"><span class="dot" style="background:var(--warn)"></span>Approval queue</div>
+        <div id="queue"><div class="qempty">— QUEUE EMPTY — AGENTS DRAFTING —</div></div>
+      </div>
+    </aside>
+  </main>
+
+  <footer>
+    PHASE 1 · MOCK ENGINE — every event is synthetic. Phase 2 wires real agents into <b>window.ECOSYS.ingest()</b> with the same event schema. Rename apps in CONFIG.
+  </footer>
+</div>
+
+<div id="dossier">
+  <div class="dcard">
+    <div class="dh"><span class="g" id="d-g">◆</span><span class="n" id="d-n">—</span><span class="c" id="d-c">CLAUDE-CLASS AUTONOMOUS UNIT</span><span class="x" id="d-x">ESC</span></div>
+    <div class="dbody">
+      <canvas id="wireframe" width="170" height="230"></canvas>
+      <div>
+        <div class="drole" id="d-role">—</div>
+        <div class="ddir" id="d-dir">—</div>
+        <div class="dstats">
+          <span class="k">TASKS COMPLETED</span><span class="v" id="d-tasks">0</span>
+          <span class="k">TOKENS CONSUMED</span><span class="v" id="d-tok">0</span>
+          <span class="k">DRAFTS FILED</span><span class="v" id="d-drafts">0</span>
+          <span class="k">APPROVAL RATE</span><span class="v" id="d-appr">—</span>
+          <span class="k">STATUS</span><span class="v" id="d-status">—</span>
+          <span class="k">STATION</span><span class="v" id="d-station">—</span>
+        </div>
+        <div class="dlog" id="d-log"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================ CONFIG ============================ */
+const CONFIG = {
+  company: "SEATCOMPRESS",
+  apps: [
+    { id:"SEATCMP", name:"SeatCompress" },  // seatcompress.com — SaaS spend optimization for CFOs
+  ],
+  tokenPricePerM: 6.0,   // blended $ / 1M tokens for the est-cost readout
+};
+
+/* ============================ WORLD ============================= */
+const STATIONS = [
+  { id:"hub",      name:"ATLAS CORE",      sub:"orchestration",   x:.44, y:.49 },
+  { id:"trend",    name:"TREND SCANNER",   sub:"keyword intel",   x:.12, y:.17 },
+  { id:"foundry",  name:"CONTENT FOUNDRY", sub:"SEO / blog",      x:.40, y:.13 },
+  { id:"approval", name:"APPROVAL GATE",   sub:"human review",    x:.74, y:.17 },
+  { id:"uplink",   name:"PUBLISH UPLINK",  sub:"outbound",        x:.90, y:.50 },
+  { id:"analytics",name:"ANALYTICS CORE",  sub:"metrics",         x:.74, y:.82 },
+  { id:"relay",    name:"LINKEDIN RELAY",  sub:"founder + page",  x:.40, y:.85 },
+  { id:"listen",   name:"LISTENING POST",  sub:"mentions",        x:.12, y:.80 },
+];
+const EDGES = [
+  ["hub","trend"],["hub","foundry"],["hub","approval"],["hub","analytics"],
+  ["hub","relay"],["hub","listen"],["hub","uplink"],
+  ["foundry","approval"],["relay","approval"],["approval","uplink"],
+];
+
+const AGENTS = [
+  { id:"ATLAS",    glyph:"A", role:"Overseer / Orchestrator", home:"hub",
+    dir:"Maintain fleet alignment. Compile weekly plans, reallocate agents, audit token burn." },
+  { id:"VECTOR",   glyph:"V", role:"Trend Scout",             home:"trend",
+    dir:"Scan search & social demand. Lock rising keywords and route them to the Foundry." },
+  { id:"QUILL",    glyph:"Q", role:"SEO Writer",              home:"foundry",
+    dir:"Draft long-form articles and landing copy against locked keywords. File to Approval Gate." },
+  { id:"ECHO",     glyph:"E", role:"Social Relay",            home:"relay",
+    dir:"Draft posts and replies for X, TikTok scripts and reddit threads. File to Approval Gate." },
+  { id:"SENTINEL", glyph:"S", role:"Listening Post",          home:"listen",
+    dir:"Monitor mentions, reviews and competitor moves. Flag engagement targets to ECHO." },
+  { id:"LEDGER",   glyph:"L", role:"Analytics",               home:"analytics",
+    dir:"Digest signups, traffic and conversion data. Report what is working — and what is not." },
+  { id:"HUNTER",   glyph:"H", role:"Outbound Prospector",     home:"listen",
+    dir:"Find warm enterprise targets (stranded Productiv customers first) from public sources. Draft every outreach message; the founder sends by hand." },
+  { id:"SCOPE",    glyph:"O", role:"People Finder",           home:"listen",
+    dir:"Turn HUNTER's target companies into named, publicly-evidenced people to connect with. Professional footprint only; the founder sends every request." },
+  { id:"ENVOY",    glyph:"N", role:"Conversation Drafter",    home:"relay",
+    dir:"When a prospect accepts or replies, draft the next message — value-first, honest, never pushy. Files to the approval gate." },
+];
+
+/* ======================= CONTENT POOLS ========================== */
+const KW = ["saas renewal negotiation","seat compression","ai agents replace saas seats","zendesk seat costs",
+  "salesforce enterprise agreement","vendor price increase 2026","unused enterprise licenses","saas spend per employee",
+  "agentic arbitrage","intercom fin vs zendesk","servicenow renewal","microsoft 365 price hike"];
+const SUBS = ["r/FinOps","r/procurement","r/SaaS","FinOps Slack","r/ITManagers","r/sysadmin"];
+const PERSONAS = ["CFOs","FinOps leads","procurement teams","SAM managers","finance VPs"];
+const PAINS = ["shelfware","auto-renewal traps","per-seat creep","true-up shock","opaque vendor pricing"];
+const rnd  = a => a[Math.floor(Math.random()*a.length)];
+const ri   = (a,b) => a + Math.floor(Math.random()*(b-a+1));
+const app  = () => rnd(CONFIG.apps);
+
+const DRAFTMAKERS = [
+  () => { const k=rnd(KW), a=app(); return { kind:"BLOG", app:a.id,
+    title:`The enterprise math on ${k} (${ri(1,5)}K-seat worked example)`,
+    body:`~${ri(12,22)*100} words · targets “${k}” · numbers reconciled vs seed.ts · CTA → /calculator` }; },
+  () => { const a=app(); return { kind:"LINKEDIN", app:a.id,
+    title:`[PERSONAL] Contrarian take: ${rnd(PAINS)} is a board-level number now`,
+    body:`founder-voice text post · worked math hook · aimed at ${rnd(PERSONAS)}` }; },
+  () => { const a=app(); return { kind:"CAROUSEL", app:a.id,
+    title:`[COMPANY] ${ri(5,8)} slides: how ${rnd(PERSONAS)} quantify ${rnd(KW)}`,
+    body:`carousel outline · data-led page voice · CTA → free calculator` }; },
+  () => { const a=app(), s=rnd(SUBS); return { kind:"REPLY", app:a.id,
+    title:`Value-first answer draft for ${s} thread on ${rnd(KW)}`,
+    body:`genuinely helpful · no pitch · founder decides whether to engage` }; },
+];
+
+const EVENTMAKERS = {
+  VECTOR: [
+    () => ({ kind:"info", text:`TREND LOCK: “${rnd(KW)}” volume +${ri(8,60)}% w/w — routed to QUILL` }),
+    () => ({ kind:"info", text:`SERP AUDIT: top 10 for “${rnd(KW)}” — ${ri(2,6)} weak results, opening found` }),
+    () => ({ kind:"warn", text:`SATURATION: “${rnd(KW)}” CPC up ${ri(12,45)}% — deprioritized` }),
+  ],
+  SENTINEL: [
+    () => ({ kind:"info", text:`MENTION: user asks for ${rnd(KW)} recs in ${rnd(SUBS)} — flagged to ECHO` }),
+    () => ({ kind:"info", text:`REVIEW: ${ri(4,5)}★ for ${app().name} captured — quote saved to library` }),
+    () => ({ kind:"warn", text:`COMPETITOR: rival shipped ${rnd(KW)} feature — brief sent to ATLAS` }),
+  ],
+  LEDGER: [
+    () => ({ kind:"info", text:`DIGEST: ${app().id} signups +${ri(2,19)}% w/w · top source organic/“${rnd(KW)}”` }),
+    () => ({ kind:"warn", text:`ALERT: bounce +${ri(5,20)}% on /pricing — flagged for copy test` }),
+    () => ({ kind:"info", text:`COHORT: ${rnd(PERSONAS)} retain ${ri(6,14)}pts better — ICP note updated` }),
+  ],
+  ATLAS: [
+    () => ({ kind:"info", text:`DIRECTIVE: prioritize ${app().id} launch content this cycle` }),
+    () => ({ kind:"info", text:`SYNC: weekly plan compiled — ${ri(8,16)} tasks queued across fleet` }),
+    () => ({ kind:"info", text:`AUDIT: token burn within budget · efficiency ${ri(88,99)}%` }),
+    () => ({ kind:"warn", text:`REALLOC: shifting ECHO capacity toward ${rnd(SUBS)} engagement` }),
+  ],
+};
+
+/* ========================= SIM STATE ============================ */
+const S = {
+  time:0, speed:1, tokens:0, drafts:0, published:0, conversions:0, revenue:0, revToday:0,
+  queue:[], feedFilter:null, selected:null, pendingConv:[],
+};
+let MOCK = true; // flips false when /api/events answers — then real agent events drive the board
+// Set from GET /api/config. True when the server gates writes (the public demo),
+// in which case the queue renders read-only rather than showing buttons that 401.
+let DEMO = false;
+const agents = AGENTS.map(a => ({
+  ...a, station:a.home, x:0, y:0, state:"idle", stateT:ri(1,5), path:null, pathD:0, pathLen:0,
+  progress:0, taskDur:0, tasks:0, tokens:0, drafts:0, approved:0, rejected:0, log:[],
+  currentTask:"initializing",
+}));
+const stationById = Object.fromEntries(STATIONS.map(s=>[s.id,s]));
+
+/* ========================= GEOMETRY ============================= */
+const canvas = document.getElementById("map"), ctx = canvas.getContext("2d");
+const mapwrap = document.getElementById("mapwrap");
+let W=0,H=0,DPR=1, PAD=70;
+function resize(){
+  DPR = window.devicePixelRatio||1;
+  W = mapwrap.clientWidth; H = Math.max(520, mapwrap.clientHeight);
+  canvas.width=W*DPR; canvas.height=H*DPR; canvas.style.height=H+"px";
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  rebuildGeometry();
+  for(const ag of agents){
+    if(ag.state==="travel" && ag.dest){
+      const frac = ag.pathLen>0 ? ag.pathD/ag.pathLen : 0;
+      ag.path=routePath(ag.station,ag.dest); ag.pathLen=polyLen(ag.path); ag.pathD=frac*ag.pathLen;
+      const p=polyAt(ag.path,ag.pathD); ag.x=p.x; ag.y=p.y;
+    }
+  }
+  layoutStationed();
+}
+new ResizeObserver(resize).observe(mapwrap);
+const px = s => ({ x: PAD + s.x*(W-2*PAD), y: PAD*0.75 + s.y*(H-1.4*PAD) });
+function elbow(a,b){ return [a,{x:b.x,y:a.y},b]; }   // horizontal-first L-path
+function polyLen(pts){ let L=0; for(let i=1;i<pts.length;i++) L+=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y); return L; }
+function polyAt(pts,d){
+  for(let i=1;i<pts.length;i++){
+    const seg=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);
+    if(d<=seg){ const t=seg?d/seg:0; return {x:pts[i-1].x+(pts[i].x-pts[i-1].x)*t, y:pts[i-1].y+(pts[i].y-pts[i-1].y)*t}; }
+    d-=seg;
+  }
+  return pts[pts.length-1];
+}
+const directEdge = (a,b)=>EDGES.some(([p,q])=>(p===a&&q===b)||(p===b&&q===a));
+function routePath(fromId,toId){
+  const A=px(stationById[fromId]), B=px(stationById[toId]);
+  if(directEdge(fromId,toId)) return elbow(A,B);
+  const Hb=px(stationById.hub);
+  return [...elbow(A,Hb), ...elbow(Hb,B).slice(1)];
+}
+let EDGE_CACHE=[];
+function rebuildGeometry(){
+  EDGE_CACHE = EDGES.map(([a,b])=>{ const pts=elbow(px(stationById[a]),px(stationById[b])); return {pts,len:polyLen(pts)}; });
+}
+resize();
+
+/* ========================= ENGINE =============================== */
+function fmt(n){ return n.toLocaleString("en-US"); }
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function ts(){ const t=Math.floor(S.time); const h=String(Math.floor(t/3600)).padStart(2,"0"),
+  m=String(Math.floor(t/60)%60).padStart(2,"0"), s=String(t%60).padStart(2,"0"); return `${h}:${m}:${s}`; }
+
+function pushFeed(agentId, stationId, kind, text, when){
+  const li=document.createElement("li"); li.className=kind; li.dataset.station=stationId||"";
+  const tag = kind==="draft"?"DRAFT":kind==="warn"?"WARN":kind==="crit"?"CRIT":kind==="pub"?"PUB":"INFO";
+  // sim lines wear sim-time; live lines wear wall-clock (theirs if the event carries one)
+  const stamp = when || (MOCK ? ts() : new Date().toTimeString().slice(0,8));
+  li.innerHTML=`<span class="ts">[${stamp}]</span> <span class="who">${esc(agentId)}</span><span class="tag">${tag}</span><span class="txt">${esc(text)}</span>`;
+  if(S.feedFilter && stationId!==S.feedFilter) li.style.display="none";
+  const feed=document.getElementById("feed");
+  feed.prepend(li);
+  while(feed.children.length>140) feed.lastChild.remove();
+  const ag=agents.find(a=>a.id===agentId);
+  if(ag){ ag.log.unshift(`[${ts()}] ${text}`); if(ag.log.length>24) ag.log.pop(); }
+}
+
+function fileDraft(ag, draft, tokens){
+  S.drafts++; ag.drafts++;
+  const item={ id:Math.random().toString(36).slice(2), agent:ag.id, tokens, ...draft };
+  S.queue.push(item);
+  pushFeed(ag.id,"approval","draft",`${draft.kind} filed to Approval Gate — “${draft.title}” [${draft.app}]`);
+  renderQueue();
+}
+
+async function gatePost(q, action){
+  // real draft: POST to the server, honestly — a swallowed failure must not count
+  if(q.busy) return false; q.busy=true;
+  let ok=false;
+  try{ const r=await fetch("/api/drafts/"+encodeURIComponent(q.id)+"/"+action,{method:"POST"}); ok=r.ok; }catch{}
+  if(!ok){
+    q.busy=false;
+    pushFeed("SYS","hub","warn",`${action.toUpperCase()} FAILED — server unreachable or draft already moved (“${q.title.slice(0,40)}…”)`);
+  }
+  pollDrafts(); pollEvents();
+  return ok;
+}
+async function approve(id){
+  const i=S.queue.findIndex(q=>q.id===id); if(i<0) return;
+  const q=S.queue[i];
+  if(q.live){ if(await gatePost(q,"approve")){ S.published++; updateTiles(); } return; }
+  S.queue.splice(i,1);
+  const ag=agents.find(a=>a.id===q.agent); if(ag) ag.approved++;
+  S.published++;
+  pushFeed("UPLINK","uplink","pub",`PUBLISHED via uplink: “${q.title}” [${q.app}]`);
+  S.pendingConv.push({ at:S.time+ri(18,70), title:q.title, app:q.app });
+  renderQueue(); updateTiles();
+}
+async function reject(id){
+  const i=S.queue.findIndex(q=>q.id===id); if(i<0) return;
+  const q=S.queue[i];
+  if(q.live){ await gatePost(q,"reject"); return; }
+  S.queue.splice(i,1);
+  const ag=agents.find(a=>a.id===q.agent); if(ag) ag.rejected++;
+  pushFeed("GATE","approval","warn",`REVISION REQUESTED: “${q.title}” returned to ${q.agent}`);
+  renderQueue(); updateTiles();
+}
+
+function renderQueue(){
+  const el=document.getElementById("queue");
+  if(!S.queue.length){ el.innerHTML=`<div class="qempty">— QUEUE EMPTY — AGENTS DRAFTING —</div>`; }
+  else el.innerHTML=S.queue.map(q=>`
+    <div class="qitem">
+      <div class="qh"><span class="k">${esc(q.kind)}</span><span>${esc(q.app)}</span><span>by ${esc(q.agent)}</span><span>${fmt(q.tokens)} tok</span></div>
+      <div class="qt">${q.live?`<a href="/draft/${encodeURIComponent(q.id)}" target="_blank" style="color:inherit;text-decoration:underline dotted">${esc(q.title)}</a>`:esc(q.title)}</div>
+      <div class="qb">${esc(q.body)}</div>
+      <div class="qa">${DEMO
+        ? `<span style="font-size:10px;letter-spacing:.12em;color:var(--warn);border:1px solid var(--warn);padding:3px 10px">DEMO · APPROVAL DISABLED</span>`
+        : `<button class="ok" data-ok="${q.id}">✓ APPROVE</button><button class="no" data-no="${q.id}">✕ REJECT</button>`}</div>
+    </div>`).join("");
+  updateTiles();
+}
+document.getElementById("queue").addEventListener("click",e=>{
+  const ok=e.target.dataset.ok, no=e.target.dataset.no;
+  if(ok) approve(ok); if(no) reject(no);
+});
+
+function updateTiles(){
+  document.getElementById("t-rev").textContent = MOCK ? "$"+fmt(Math.round(S.revenue)) : fmt(evCursor);
+  document.getElementById("t-rev-sub").textContent = MOCK
+    ? (S.revToday?`+$${fmt(Math.round(S.revToday))} this session`: "simulated attribution")
+    : "pipeline event log";
+  document.getElementById("t-tok").textContent = fmt(S.tokens);
+  document.getElementById("t-tok-sub").textContent = `≈ $${(S.tokens/1e6*CONFIG.tokenPricePerM).toFixed(2)} est. cost`;
+  document.getElementById("t-drafts").textContent = fmt(S.drafts);
+  document.getElementById("t-queue").textContent = fmt(S.queue.length);
+  const qs=document.getElementById("t-queue-sub");
+  qs.textContent = S.queue.length>4 ? "⚠ backlog building — review!" : "human-in-the-loop gate";
+  qs.classList.toggle("warn", S.queue.length>4);
+  document.getElementById("t-pub").textContent = fmt(S.published);
+  document.getElementById("t-pub-sub").textContent = MOCK ? `${fmt(S.conversions)} conversions` : "founder posts manually";
+}
+
+/* -------- agent behavior state machine -------- */
+const WORK_STATIONS = { VECTOR:["trend","trend","listen"], QUILL:["foundry"], ECHO:["relay"],
+  SENTINEL:["listen"], LEDGER:["analytics"], HUNTER:["listen","listen","relay"],
+  SCOPE:["listen"], ENVOY:["relay"],
+  ATLAS:["hub","hub","hub","trend","foundry","relay","analytics"] };
+
+function startTask(ag){
+  const dest = rnd(WORK_STATIONS[ag.id]);
+  ag.currentTask = dest===ag.station ? "processing" : "en route → "+stationById[dest].name;
+  if(dest!==ag.station){
+    ag.path=routePath(ag.station,dest); ag.pathLen=polyLen(ag.path); ag.pathD=0;
+    ag.state="travel"; ag.dest=dest;
+  } else beginWork(ag);
+}
+function beginWork(ag){
+  ag.state="work"; ag.taskDur=ri(5,11); ag.progress=0;
+  ag.currentTask="working @ "+stationById[ag.station].name;
+}
+function finishWork(ag){
+  // live: work only ever starts from a real event nudge, so counting it is honest
+  if(!MOCK){ ag.tasks++; ag.state="idle"; ag.stateT=ri(4,8); ag.currentTask="task logged — standing by"; return; }
+  const tokens=ri(600,14000); ag.tokens+=tokens; S.tokens+=tokens; ag.tasks++;
+  const isDrafter = (ag.id==="QUILL"||ag.id==="ECHO");
+  if(isDrafter && Math.random()<0.72 && S.queue.length<9){
+    fileDraft(ag, rnd(DRAFTMAKERS)(), tokens);
+  } else {
+    const mk = EVENTMAKERS[ag.id] ? rnd(EVENTMAKERS[ag.id])() :
+      { kind:"info", text:"cycle complete — output archived" };
+    pushFeed(ag.id, ag.station, mk.kind, mk.text);
+  }
+  ag.state="idle"; ag.stateT=ri(2,7); ag.currentTask="cooldown";
+  updateTiles();
+}
+function tickAgents(dt){
+  for(const ag of agents){
+    if(ag.state==="idle"){
+      if(MOCK){ ag.stateT-=dt; if(ag.stateT<=0) startTask(ag); }
+      else if(ag.station!==ag.home){ // live: linger at the event site briefly, then return to post
+        ag.stateT-=dt;
+        if(ag.stateT<=0){
+          ag.returning=true;
+          ag.path=routePath(ag.station,ag.home); ag.pathLen=polyLen(ag.path); ag.pathD=0;
+          ag.state="travel"; ag.dest=ag.home; ag.currentTask="returning to post";
+        }
+      }
+    }
+    else if(ag.state==="travel"){
+      ag.pathD+=dt*95;
+      const p=polyAt(ag.path,Math.min(ag.pathD,ag.pathLen)); ag.x=p.x; ag.y=p.y;
+      if(ag.pathD>=ag.pathLen){
+        ag.station=ag.dest; ag.path=null;
+        if(ag.returning){ ag.returning=false; ag.state="idle"; ag.stateT=0; ag.currentTask="standing by"; }
+        else beginWork(ag);
+      }
+    }
+    else if(ag.state==="work"){
+      ag.progress+=dt/ag.taskDur;
+      if(ag.progress>=1) finishWork(ag);
+    }
+  }
+  layoutStationed();
+}
+// Spread ALL non-traveling agents parked at a station (working AND idle/cooldown),
+// with alternating label rows — spreading only workers left idle agents stacked
+// underneath whoever re-centered after they finished.
+function layoutStationed(){
+  const groups={};
+  for(const ag of agents) if(ag.state!=="travel") (groups[ag.station]??=[]).push(ag);
+  for(const id in groups){
+    const g=groups[id], h=px(stationById[id]);
+    g.forEach((ag,k)=>{
+      ag.x=h.x-((g.length-1)*34)/2+k*34;
+      ag.y=h.y+32;
+      ag.labelDy=(k%2)?31:20;
+    });
+  }
+}
+function tickConversions(){
+  for(let i=S.pendingConv.length-1;i>=0;i--){
+    const c=S.pendingConv[i];
+    if(S.time>=c.at){
+      S.pendingConv.splice(i,1);
+      if(Math.random()<0.62){
+        const n=ri(1,9), v=n*ri(19,49);
+        S.conversions+=n; S.revenue+=v; S.revToday+=v;
+        pushFeed("LEDGER","analytics","pub",`CONVERSION: “${String(c.title||"").slice(0,42)}…” → ${n} signups [${c.app}] (+$${v} pipeline)`);
+      }
+      updateTiles();
+    }
+  }
+}
+
+/* ========================= RENDER =============================== */
+const pulses = EDGES.map((_,i)=>({i, t:Math.random()}));
+const FONT_FAMILY = getComputedStyle(document.body).fontFamily;
+function draw(dt){
+  ctx.clearRect(0,0,W,H);
+  // grid
+  ctx.strokeStyle="rgba(20,82,46,.14)"; ctx.lineWidth=1;
+  for(let x=0;x<W;x+=34){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for(let y=0;y<H;y+=34){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  // conduits (geometry cached in rebuildGeometry, only recomputed on resize)
+  ctx.strokeStyle="rgba(65,255,138,.22)"; ctx.lineWidth=1.5;
+  for(const ec of EDGE_CACHE){
+    ctx.beginPath(); ctx.moveTo(ec.pts[0].x,ec.pts[0].y);
+    for(let i=1;i<ec.pts.length;i++) ctx.lineTo(ec.pts[i].x,ec.pts[i].y);
+    ctx.stroke();
+  }
+  // ambient pulses are simulation flavor only; live mode pulses only on real events
+  if(MOCK){
+    ctx.fillStyle="rgba(65,255,138,.8)";
+    for(const pl of pulses){
+      pl.t+=dt*0.25*S.speed; if(pl.t>1) pl.t=0;
+      const ec=EDGE_CACHE[pl.i];
+      const p=polyAt(ec.pts, pl.t*ec.len);
+      ctx.beginPath(); ctx.arc(p.x,p.y,1.8,0,7); ctx.fill();
+    }
+  }
+  for(let i=livePulses.length-1;i>=0;i--){ // transient per-event pulses (hub → event station)
+    const lp=livePulses[i];
+    lp.t+=dt*0.8;
+    if(lp.t>=1){ livePulses.splice(i,1); continue; }
+    const p=polyAt(lp.pts, lp.t*lp.len);
+    ctx.fillStyle="rgba(65,255,138,.9)";
+    ctx.beginPath(); ctx.arc(p.x,p.y,2.4,0,7); ctx.fill();
+  }
+  // stations
+  for(const st of STATIONS){
+    const p=px(st), w=st.id==="hub"?128:118, h=st.id==="hub"?58:50;
+    const busy=agents.some(a=>a.station===st.id&&a.state==="work");
+    const filtered = S.feedFilter===st.id;
+    ctx.fillStyle= filtered? "rgba(65,255,138,.14)" : "rgba(10,32,21,.92)";
+    ctx.strokeStyle= filtered? "#41ff8a" : busy? "rgba(65,255,138,.75)" : "rgba(20,82,46,.9)";
+    ctx.lineWidth= filtered?1.8:1.2;
+    ctx.shadowColor="rgba(65,255,138,.5)"; ctx.shadowBlur= busy?14:0;
+    ctx.fillRect(p.x-w/2,p.y-h/2,w,h); ctx.strokeRect(p.x-w/2,p.y-h/2,w,h);
+    ctx.shadowBlur=0;
+    ctx.font="10px "+FONT_FAMILY;
+    ctx.textAlign="center";
+    ctx.fillStyle="#eafff1"; ctx.fillText(st.name,p.x,p.y-4);
+    ctx.fillStyle="#41855e"; ctx.fillText(st.sub,p.x,p.y+10);
+    if(st.id==="approval" && S.queue.length){
+      ctx.fillStyle="#ffc857"; ctx.fillText("◈ "+S.queue.length+" WAITING",p.x,p.y+h/2+13);
+    }
+  }
+  // agents
+  for(const ag of agents){
+    const sel = S.selected===ag.id;
+    ctx.shadowColor="rgba(65,255,138,.8)"; ctx.shadowBlur= sel?16:8;
+    ctx.fillStyle= "#0a2015";
+    ctx.strokeStyle= sel? "#eafff1" : "#41ff8a"; ctx.lineWidth= sel?2:1.4;
+    ctx.beginPath(); ctx.arc(ag.x,ag.y,9,0,7); ctx.fill(); ctx.stroke();
+    ctx.shadowBlur=0;
+    ctx.fillStyle="#41ff8a"; ctx.font="bold 9px "+FONT_FAMILY;
+    ctx.textAlign="center"; ctx.fillText(ag.glyph, ag.x, ag.y+3);
+    ctx.fillStyle= sel?"#eafff1":"#6bcb90"; ctx.font="8px "+FONT_FAMILY;
+    ctx.fillText(ag.id, ag.x, ag.y+(ag.state==="travel"?20:(ag.labelDy||20)));
+    if(ag.state==="work"){
+      ctx.strokeStyle="#ffc857"; ctx.lineWidth=1.6;
+      ctx.beginPath(); ctx.arc(ag.x,ag.y,13,-Math.PI/2,-Math.PI/2+ag.progress*2*Math.PI); ctx.stroke();
+    }
+  }
+}
+
+/* -------- map interaction -------- */
+const tip=document.getElementById("maptip");
+function hitTest(mx,my){
+  for(const ag of agents) if(Math.hypot(mx-ag.x,my-ag.y)<14) return {type:"agent",ag};
+  for(const st of STATIONS){
+    const p=px(st), w=st.id==="hub"?128:118, h=st.id==="hub"?58:50;
+    if(mx>p.x-w/2&&mx<p.x+w/2&&my>p.y-h/2&&my<p.y+h/2) return {type:"station",st};
+  }
+  return null;
+}
+canvas.addEventListener("mousemove",e=>{
+  const r=canvas.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+  const hit=hitTest(mx,my);
+  canvas.style.cursor= hit? "pointer":"crosshair";
+  if(hit){
+    tip.style.display="block";
+    tip.style.left=Math.min(mx+14,W-250)+"px"; tip.style.top=(my+12)+"px";
+    tip.innerHTML = hit.type==="agent"
+      ? `<div class="t">◆ ${esc(hit.ag.id)}</div><div class="s">${esc(hit.ag.role)}</div><div class="s">» ${esc(hit.ag.currentTask)}</div>`
+      : `<div class="t">▣ ${esc(hit.st.name)}</div><div class="s">${esc(hit.st.sub)} — click to filter feed</div>`;
+  } else tip.style.display="none";
+});
+canvas.addEventListener("mouseleave",()=>tip.style.display="none");
+canvas.addEventListener("click",e=>{
+  const r=canvas.getBoundingClientRect();
+  const hit=hitTest(e.clientX-r.left,e.clientY-r.top);
+  if(!hit){ setFilter(null); S.selected=null; return; }
+  if(hit.type==="agent"){ openDossier(hit.ag); }
+  else setFilter(S.feedFilter===hit.st.id? null : hit.st.id);
+});
+function setFilter(id){
+  S.feedFilter=id;
+  document.getElementById("feedtitle").textContent = id? "Event feed — "+stationById[id].name : "Event feed";
+  document.getElementById("feedclr").style.display = id? "inline":"none";
+  for(const li of document.getElementById("feed").children)
+    li.style.display = (!id || li.dataset.station===id)? "":"none";
+}
+document.getElementById("feedclr").onclick=()=>setFilter(null);
+
+/* -------- dossier -------- */
+const dossier=document.getElementById("dossier");
+let wfAnim=null, lastLogKey="";
+function openDossier(ag){
+  S.selected=ag.id;
+  document.getElementById("d-g").textContent="◆";
+  document.getElementById("d-n").textContent=ag.id;
+  document.getElementById("d-role").textContent=ag.role;
+  document.getElementById("d-dir").textContent="DIRECTIVE: "+ag.dir;
+  refreshDossier(ag);
+  dossier.classList.add("open");
+  const wf=document.getElementById("wireframe").getContext("2d");
+  let t=0; cancelAnimationFrame(wfAnim);
+  (function loop(){
+    t+=0.016; drawWireframe(wf,t);
+    if(dossier.classList.contains("open")) wfAnim=requestAnimationFrame(loop);
+  })();
+}
+function refreshDossier(ag){
+  document.getElementById("d-tasks").textContent=fmt(ag.tasks);
+  document.getElementById("d-tok").textContent=fmt(ag.tokens);
+  document.getElementById("d-drafts").textContent=fmt(ag.drafts);
+  const tot=ag.approved+ag.rejected;
+  document.getElementById("d-appr").textContent= tot? Math.round(ag.approved/tot*100)+"%":"—";
+  document.getElementById("d-status").textContent=ag.state.toUpperCase();
+  document.getElementById("d-station").textContent=stationById[ag.station].name;
+  const logKey=ag.id+"|"+ag.log.length+"|"+(ag.log[0]||"");
+  if(logKey!==lastLogKey){
+    lastLogKey=logKey;
+    document.getElementById("d-log").innerHTML=ag.log.slice(0,10).map(l=>`<div>${esc(l)}</div>`).join("")||"<div>— no activity yet —</div>";
+  }
+}
+function closeDossier(){ dossier.classList.remove("open"); S.selected=null; cancelAnimationFrame(wfAnim); }
+document.getElementById("d-x").onclick=closeDossier;
+dossier.addEventListener("click",e=>{ if(e.target===dossier) closeDossier(); });
+addEventListener("keydown",e=>{ if(e.key==="Escape") closeDossier(); });
+
+function drawWireframe(g,t){
+  g.clearRect(0,0,170,230);
+  g.strokeStyle="rgba(65,255,138,.85)"; g.lineWidth=1;
+  g.save(); g.translate(85,20);
+  // head
+  g.beginPath(); g.arc(0,22,16,0,7); g.stroke();
+  g.beginPath(); g.moveTo(-8,20); g.lineTo(-3,20); g.moveTo(3,20); g.lineTo(8,20); g.stroke(); // eyes
+  // torso
+  g.beginPath(); g.moveTo(-20,45); g.lineTo(20,45); g.lineTo(14,110); g.lineTo(-14,110); g.closePath(); g.stroke();
+  // torso circuitry
+  g.strokeStyle="rgba(65,255,138,.35)";
+  for(let i=0;i<4;i++){ g.beginPath(); g.moveTo(-14+i*2,52+i*14); g.lineTo(14-i*2,52+i*14); g.stroke(); }
+  g.strokeStyle="rgba(65,255,138,.85)";
+  // arms
+  g.beginPath(); g.moveTo(-20,48); g.lineTo(-34,85); g.lineTo(-30,118); g.stroke();
+  g.beginPath(); g.moveTo(20,48); g.lineTo(34,85); g.lineTo(30,118); g.stroke();
+  // legs
+  g.beginPath(); g.moveTo(-10,110); g.lineTo(-12,165); g.lineTo(-14,190); g.stroke();
+  g.beginPath(); g.moveTo(10,110); g.lineTo(12,165); g.lineTo(14,190); g.stroke();
+  // core
+  g.fillStyle="rgba(65,255,138,"+(0.4+0.3*Math.sin(t*3))+")";
+  g.beginPath(); g.arc(0,70,5,0,7); g.fill();
+  g.restore();
+  // scan sweep
+  const y=(t*40)%230;
+  g.fillStyle="rgba(65,255,138,.10)"; g.fillRect(0,y-8,170,16);
+  g.strokeStyle="rgba(65,255,138,.5)"; g.beginPath(); g.moveTo(0,y); g.lineTo(170,y); g.stroke();
+}
+
+/* -------- speed controls -------- */
+document.getElementById("speed").addEventListener("click",e=>{
+  if(e.target.tagName!=="BUTTON") return;
+  S.speed=Number(e.target.dataset.s);
+  for(const b of document.querySelectorAll(".speed button")) b.classList.toggle("on",b===e.target);
+});
+
+/* ---------- public API for Phase 2 (real agents) ---------- */
+window.ECOSYS = {
+  ingest(evt){
+    // evt: {agent, station, kind, text, tokens, draft} — returns true only if the
+    // event was accepted IN FULL. A rejected draft rejects the whole event (no
+    // token accumulation), so Phase 2 callers can trust the boolean.
+    // All string fields are escaped at the render sinks; tokens must be finite ≥ 0.
+    if(!evt || typeof evt!=="object") return false;
+    const tokens = Number.isFinite(evt.tokens) && evt.tokens>0 ? evt.tokens : 0;
+    const a = agents.find(x=>x.id===evt.agent);
+    let accepted=false;
+    if(evt.draft!==undefined){
+      if(!a || typeof evt.draft!=="object" || evt.draft===null){
+        pushFeed("SYS","hub","warn",`INGEST REJECTED: ${a?"malformed draft":"draft from unknown agent"} “${evt.agent}”`);
+        return false;
+      }
+      fileDraft(a, { kind:String(evt.draft.kind||"DRAFT"), app:String(evt.draft.app||"—"),
+        title:String(evt.draft.title||"(untitled)"), body:String(evt.draft.body||"") }, tokens);
+      accepted=true;
+    }
+    if(typeof evt.text==="string" && evt.text){
+      const station = stationById[evt.station] ? evt.station : "hub";
+      const kind = ["info","warn","crit","draft","pub"].includes(evt.kind) ? evt.kind : "info";
+      const when = typeof evt.ts==="string" && !isNaN(Date.parse(evt.ts))
+        ? new Date(evt.ts).toTimeString().slice(0,8) : null;
+      pushFeed(String(evt.agent||"SYS"), station, kind, evt.text, when);
+      if(!MOCK && kind==="draft") S.drafts++; // live drafts are filed on disk, not via fileDraft
+      accepted=true;
+    }
+    if(!accepted && !tokens) return false;
+    if(tokens){ S.tokens+=tokens; if(a) a.tokens+=tokens; }
+    updateTiles();
+    return true;
+  },
+  setMode(m){
+    const b=document.getElementById("modebadge");
+    // startsWith, not equality: "LIVE · DEMO" is still live and must keep the live styling.
+    b.textContent="MODE: "+m; b.classList.toggle("live", m.startsWith("LIVE"));
+  },
+  state:S, agents,
+};
+
+/* ---------- self-test: open with ?selftest=1 (used by the sprint loop) ---------- */
+function runSelfTest(){
+  const results=[];
+  const t=(name,fn)=>{ try{ results.push({name, pass:!!fn()}); }catch(err){ results.push({name, pass:false, err:String(err)}); } };
+  t("rejects undefined",    ()=> window.ECOSYS.ingest()===false);
+  t("rejects null",         ()=> window.ECOSYS.ingest(null)===false);
+  t("rejects non-object",   ()=> window.ECOSYS.ingest("evt")===false);
+  t("rejects empty object", ()=> window.ECOSYS.ingest({})===false);
+  t("accepts text event",   ()=> window.ECOSYS.ingest({agent:"QUILL",text:"selftest text"})===true);
+  t("rejects unknown-agent draft and keeps its tokens out", ()=>{
+    const before=S.tokens;
+    return window.ECOSYS.ingest({agent:"NOBODY",draft:{title:"x"},tokens:500})===false && S.tokens===before;
+  });
+  t("rejects malformed draft", ()=> window.ECOSYS.ingest({agent:"QUILL",draft:"not-an-object"})===false);
+  t("accepts valid draft + tokens", ()=>{
+    const q=S.queue.length, before=S.tokens;
+    const ok=window.ECOSYS.ingest({agent:"QUILL",draft:{kind:"BLOG",app:"APP-01",title:"T",body:"B"},tokens:100});
+    return ok===true && S.queue.length===q+1 && S.tokens===before+100;
+  });
+  t("ignores string tokens", ()=>{
+    const before=S.tokens;
+    return window.ECOSYS.ingest({agent:"ECHO",tokens:"1234"})===false && S.tokens===before && typeof S.tokens==="number";
+  });
+  t("escapes HTML in feed", ()=>{
+    window.ECOSYS.ingest({agent:"ECHO",text:"<img src=x onerror=window.__pwned=1>"});
+    const li=document.getElementById("feed").firstChild;
+    // querySelector + textContent fail synchronously on a broken escape; an async
+    // onerror side-effect check would pass vacuously here, so don't assert one.
+    return !li.querySelector("img") && li.textContent.includes("<img");
+  });
+  t("whitelists station/kind", ()=>{
+    window.ECOSYS.ingest({agent:"ECHO",text:"bogus meta",station:"nope",kind:"nope"});
+    const li=document.getElementById("feed").firstChild;
+    return li.dataset.station==="hub" && li.classList.contains("info");
+  });
+  t("applyLive advances cursor; unknown agent renders without a map nudge", ()=>{
+    const c0=evCursor;
+    applyLive({next:c0+1, events:[{agent:"GATE",station:"uplink",kind:"pub",text:"selftest live event"}]});
+    const li=document.getElementById("feed").firstChild;
+    const ok = evCursor===c0+1 && li.textContent.includes("selftest live event") && !agents.some(a=>a.dest==="uplink"&&a.currentTask==="responding to live event");
+    evCursor=c0; // restore — a perturbed cursor would skip or duplicate real live events
+    return ok;
+  });
+  t("applyLive re-syncs when the event log shrinks", ()=>{
+    const c0=evCursor;
+    evCursor=c0+5; // simulate a cursor ahead of a shrunken log
+    applyLive({next:c0, events:[]});
+    const reset = evCursor===0;
+    evCursor=c0; // restore the real cursor
+    return reset;
+  });
+  t("live: away-from-home agent returns to post", ()=>{
+    const m0=MOCK; MOCK=false;
+    const ag=agents.find(a=>a.id==="VECTOR");
+    const s0={state:ag.state,station:ag.station,stateT:ag.stateT,path:ag.path,dest:ag.dest,returning:ag.returning,task:ag.currentTask};
+    ag.state="idle"; ag.station="listen"; ag.stateT=0; ag.returning=false;
+    tickAgents(0.1);
+    const startedHome = ag.returning===true && ag.state==="travel" && ag.dest===ag.home && ag.currentTask==="returning to post";
+    ag.pathD=ag.pathLen; tickAgents(0.1);
+    const arrived = ag.state==="idle" && ag.currentTask==="standing by" && ag.station===ag.home;
+    Object.assign(ag,{state:s0.state,station:s0.station,stateT:s0.stateT,path:s0.path,dest:s0.dest,returning:s0.returning,currentTask:s0.task});
+    MOCK=m0;
+    return startedHome && arrived;
+  });
+  t("live: home agent does not roam", ()=>{
+    const m0=MOCK; MOCK=false;
+    const ag=agents.find(a=>a.id==="QUILL");
+    const s0={state:ag.state,station:ag.station,stateT:ag.stateT,path:ag.path,task:ag.currentTask};
+    ag.state="idle"; ag.station=ag.home; ag.stateT=0;
+    tickAgents(10);
+    const stayed = ag.state==="idle" && ag.station===ag.home;
+    Object.assign(ag,{state:s0.state,station:s0.station,stateT:s0.stateT,path:s0.path,currentTask:s0.task});
+    MOCK=m0;
+    return stayed;
+  });
+  t("live: event at agent's own station starts in-place processing", ()=>{
+    const m0=MOCK; MOCK=false;
+    const ag=agents.find(a=>a.id==="SENTINEL");
+    const s0={state:ag.state,station:ag.station,stateT:ag.stateT,path:ag.path,task:ag.currentTask,progress:ag.progress,taskDur:ag.taskDur};
+    ag.state="idle"; ag.station="listen"; ag.stateT=99;
+    const c0=evCursor;
+    applyLive({next:c0+1, events:[{agent:"SENTINEL",station:"listen",kind:"info",text:"selftest in-place event"}]});
+    const ok = ag.state==="work" && ag.currentTask==="processing live event";
+    evCursor=c0;
+    Object.assign(ag,{state:s0.state,station:s0.station,stateT:s0.stateT,path:s0.path,currentTask:s0.task,progress:s0.progress,taskDur:s0.taskDur});
+    MOCK=m0;
+    return ok;
+  });
+  const passed=results.filter(r=>r.pass).length;
+  console.table(results);
+  const div=document.createElement("div");
+  div.id="selftest";
+  div.style.cssText="border:1px solid;padding:6px 12px;margin-bottom:10px;font-size:12px;letter-spacing:.1em;"
+    +(passed===results.length?"color:#41ff8a;border-color:#41ff8a":"color:#ff6b6b;border-color:#ff6b6b");
+  div.textContent=`SELF-TEST: ${passed}/${results.length} PASS`
+    +(passed===results.length?"":" — FAILED: "+results.filter(r=>!r.pass).map(r=>r.name).join(", "));
+  document.querySelector(".wrap").prepend(div);
+  return passed===results.length;
+}
+// invoked below, after the LIVE-mode declarations it exercises are initialized
+
+/* ---------- LIVE mode: poll the local server when served over http ---------- */
+let evCursor=0, liveStarted=false, liveFails=0, liveLost=false;
+const livePulses=[];
+function firePulse(stationId){
+  if(stationId==="hub" || !stationById[stationId]) return;
+  const pts=routePath("hub",stationId);
+  livePulses.push({pts, len:polyLen(pts), t:0});
+}
+function applyLive(data){
+  // A malformed response must never touch the cursor. If evCursor went undefined
+  // the next poll would send since=undefined, the server would coerce it to 0,
+  // and the whole log would replay — silently doubling the token and draft tiles.
+  if(!data || !Number.isFinite(data.next) || !Array.isArray(data.events)) return;
+  if(data.next < evCursor){ // server restarted with a shorter log — re-sync from the top
+    pushFeed("SYS","hub","warn","LIVE LINK: event log reset detected (server restart?) — re-syncing feed");
+    evCursor=0;
+    return;
+  }
+  evCursor=data.next;
+  for(const evt of data.events){
+    window.ECOSYS.ingest(evt);
+    if(stationById[evt.station]) firePulse(evt.station);
+    // nudge the matching agent to physically visit the event's station
+    const a=agents.find(x=>x.id===evt.agent);
+    if(a && stationById[evt.station]){
+      if(a.state==="idle" && a.station!==evt.station){
+        a.returning=false;
+        a.path=routePath(a.station,evt.station); a.pathLen=polyLen(a.path); a.pathD=0;
+        a.state="travel"; a.dest=evt.station; a.currentTask="responding to live event";
+      } else if(a.state==="idle"){
+        beginWork(a); a.currentTask="processing live event";
+      }
+    }
+  }
+}
+async function pollEvents(){
+  try{
+    const r=await fetch("/api/events?since="+(Number.isFinite(evCursor)?evCursor:0));
+    if(!r.ok) throw new Error("http "+r.status);
+    applyLive(await r.json());
+    liveFails=0;
+    if(liveLost){
+      liveLost=false;
+      // Re-render through setMode so a restored demo instance keeps its DEMO marker.
+      window.ECOSYS.setMode(DEMO ? "LIVE · DEMO" : "LIVE");
+      pushFeed("SYS","hub","info","LIVE LINK RESTORED");
+    }
+  }catch{
+    if(++liveFails===3 && !liveLost){ // ~15s of silence → tell the founder the board is stale
+      liveLost=true;
+      document.getElementById("modebadge").textContent="MODE: LIVE (STALE)";
+      pushFeed("SYS","hub","warn","LIVE LINK LOST — server unreachable; board data is stale");
+    }
+  }
+}
+async function pollDrafts(){
+  try{
+    const r=await fetch("/api/drafts"); if(!r.ok) return;
+    const list=await r.json();
+    S.queue=list.map(d=>({ id:d.id, live:true, kind:d.kind||"DRAFT", app:d.app||"SEATCMP",
+      title:d.title||"(untitled)", body:d.body||"", agent:d.agent||"QUILL",
+      tokens:Number.isFinite(d.tokens)?d.tokens:0 }));
+    renderQueue();
+  }catch{}
+}
+async function goLive(){
+  if(!location.protocol.startsWith("http")) return;
+  try{
+    const r=await fetch("/api/events?since=0");
+    if(!r.ok || liveStarted) return;
+    liveStarted=true;
+    MOCK=false;
+    // Ask the server whether writes are gated before rendering any approve buttons.
+    try{ const c=await fetch("/api/config"); if(c.ok) DEMO=!!(await c.json()).demo; }catch{}
+    window.ECOSYS.setMode(DEMO ? "LIVE · DEMO" : "LIVE");
+    // in live mode approval means "ready for the founder to post", never "published"
+    const pubTile=document.getElementById("t-pub").parentElement.querySelector(".lbl");
+    if(pubTile) pubTile.textContent="Approved / ready";
+    // no simulated revenue and no sim-speed controls in live mode — the board only shows what happened
+    const revTile=document.getElementById("t-rev").parentElement.querySelector(".lbl");
+    if(revTile) revTile.textContent="Events logged";
+    document.getElementById("speed").style.display="none";
+    // normalize to a clean live start — a mock-era travel completing after the flip
+    // would otherwise count a task no real event caused
+    for(const a of agents){ a.state="idle"; a.station=a.home; a.path=null; a.returning=false; a.stateT=0; a.currentTask="standing by"; }
+    pushFeed("SYS","hub","info","LIVE LINK ESTABLISHED — mock engine muted; events now come from real agent runs");
+    applyLive(await r.json());
+    pollDrafts();
+    setInterval(pollEvents,5000);
+    setInterval(pollDrafts,8000);
+  }catch{ /* no server — stay in simulation */ }
+}
+goLive();
+if(new URLSearchParams(location.search).has("selftest")) runSelfTest();
+
+/* ========================= MAIN LOOP ============================ */
+let last=performance.now();
+function frame(now){
+  const rdt=Math.min(0.05,(now-last)/1000); last=now;
+  const dt=rdt*S.speed;
+  S.time+=dt;
+  tickAgents(dt); tickConversions();
+  draw(rdt);
+  document.getElementById("clock").textContent="UPTIME "+ts();
+  if(dossier.classList.contains("open")&&S.selected) refreshDossier(agents.find(a=>a.id===S.selected));
+  requestAnimationFrame(frame);
+}
+pushFeed("ATLAS","hub","info",`BOOT: ${CONFIG.company} marketing fleet online — ${agents.length} units · ${CONFIG.apps.map(a=>a.id).join(" · ")}`);
+updateTiles();
+requestAnimationFrame(frame);
+</script>
