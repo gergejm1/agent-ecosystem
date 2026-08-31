@@ -1,0 +1,145 @@
+name: test, build, deploy
+
+# Docker is not installed on the author's machine, so this workflow is also the
+# Dockerfile's first real validation. Build failures show up here, not locally.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Zero dependencies, so there is nothing to install.
+      - name: Run test suite
+        run: node tests/run-tests.js
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.img.outputs.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # github.repository preserves owner casing; docker push rejects uppercase.
+      - name: Compute lowercase image name
+        id: img
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Build WITHOUT pushing. Nothing reaches the registry until the smoke test
+      # passes, so a broken image can never be deployed by a later :latest pull.
+      - name: Build candidate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ecosys-candidate:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the candidate image
+        run: |
+          set -euo pipefail
+          IMG=ecosys-candidate:test
+
+          # `docker run ... | grep` cannot be used here: the container exits non-zero
+          # by design, which pipefail would report as failure, and `cmd && echo` is
+          # exempt from set -e so a real failure would pass silently. Capture, then
+          # assert with grep as a standalone command. `timeout` guards the case where
+          # the interlock regresses and the container never exits.
+          out=$(timeout 60 docker run --rm -e ECOSYS_TOKEN= "$IMG" 2>&1 || true)
+          grep -q "REFUSING TO START" <<<"$out"
+          echo "interlock holds"
+
+          out=$(timeout 60 docker run --rm -e ECOSYS_TOKEN=short "$IMG" 2>&1 || true)
+          grep -q "at least 32" <<<"$out"
+          echo "token strength enforced"
+
+          docker run -d --name smoke -p 4242:4242 \
+            -e ECOSYS_TOKEN=ci-smoke-token-that-is-at-least-32-chars "$IMG"
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:4242/healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+          curl -fsS http://127.0.0.1:4242/healthz >/dev/null
+          echo "healthz ok"
+
+          grep -q "AGENT ECOSYSTEM" <<<"$(curl -fsS http://127.0.0.1:4242/)"
+          echo "dashboard served"
+
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4242/CLAUDE.md)" = "404"
+          echo "static allowlist holds"
+
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:4242/api/events)" = "401"
+          echo "write auth holds"
+
+          # Must advertise demo mode, or the deployed dashboard renders approve
+          # buttons that silently 401.
+          grep -q '"demo":true' <<<"$(curl -fsS http://127.0.0.1:4242/api/config)"
+          echo "demo mode advertised"
+
+          # The shipped dataset must be the synthetic one. A real prospect name
+          # here means private data got baked into a public image.
+          grep -q "Northwind" <<<"$(curl -fsS http://127.0.0.1:4242/api/drafts)"
+          echo "synthetic seed present"
+
+      - name: Container logs and cleanup
+        if: always()
+        run: |
+          docker logs smoke 2>&1 || true
+          docker rm -f smoke 2>/dev/null || true
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only now, with a smoke-tested image, does anything reach the registry.
+      - name: Push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.img.outputs.name }}:latest
+            ${{ steps.img.outputs.name }}:${{ github.sha }}
+          cache-from: type=gha
+
+  # Enable once the Azure Container App exists and AZURE_CREDENTIALS is set.
+  # Disabled so the workflow is green before any Azure resources are created.
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    if: false
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+      - name: Update the Container App to the new image
+        run: |
+          az containerapp update \
+            --name agent-ecosystem \
+            --resource-group rg-agent-ecosystem \
+            --image ${{ needs.build.outputs.image }}:${{ github.sha }}
