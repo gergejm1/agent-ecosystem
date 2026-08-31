@@ -985,9 +985,18 @@ async function pollDrafts(){
 }
 async function goLive(){
   if(!location.protocol.startsWith("http")) return;
+  // Retry before giving up. A scale-to-zero container cold-starts on the first
+  // request, and a single failed fetch here would leave a visitor looking at the
+  // mock simulation while believing it is live data.
+  for(let attempt=0; attempt<6 && !liveStarted; attempt++){
+    if(attempt) await new Promise(r=>setTimeout(r, 1500));
+    if(await tryGoLive()) return;
+  }
+}
+async function tryGoLive(){
   try{
     const r=await fetch("/api/events?since=0");
-    if(!r.ok || liveStarted) return;
+    if(!r.ok || liveStarted) return false;
     liveStarted=true;
     MOCK=false;
     // Ask the server whether writes are gated before rendering any approve buttons.
@@ -1008,7 +1017,8 @@ async function goLive(){
     pollDrafts();
     setInterval(pollEvents,5000);
     setInterval(pollDrafts,8000);
-  }catch{ /* no server — stay in simulation */ }
+    return true;
+  }catch{ return false; } // server not up yet — caller retries, then stays in simulation
 }
 goLive();
 if(new URLSearchParams(location.search).has("selftest")) runSelfTest();
